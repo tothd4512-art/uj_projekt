@@ -1,0 +1,2 @@
+# Windows batch launchers must keep CRLF, including on Linux checkouts.
+*.cmd text eol=crlf whitespace=cr-at-eol

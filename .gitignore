@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+tools/tcl505/reports/
+tools/tcl505/platform-tools/
+*.zip
