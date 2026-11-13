@@ -15,6 +15,7 @@ import queue
 import re
 import secrets
 import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -24,7 +25,7 @@ from typing import Callable, Optional
 
 from tcl505_probe import redact
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 REPORT_SCHEMA = 1
 MANIFEST_SCHEMA = 1
 MAX_EVENTS = 10000
@@ -34,6 +35,8 @@ MIN_SECONDS = 1.0
 MAX_SECONDS = 600.0
 SNAPSHOT_INTERVAL = 1.0
 DRAIN_TIMEOUT = 0.2
+MAX_MARKERS = 200
+MARKER_MAX_CHARS = 120
 
 # CM_NOTIFY_ACTION values for CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE.
 CM_ACTIONS = {7: "enumerated", 8: "started", 9: "removed"}
@@ -147,6 +150,31 @@ class UsbTracker:
         self.active: dict[str, dict] = {}
         self.dropped_events = 0
         self.ignored_non_usb = 0
+        self.markers: list[dict] = []
+        self.markers_dropped = 0
+
+    def add_marker(self, label: Optional[str], elapsed: float, utc: datetime) -> bool:
+        """Record an operator marker at an exact elapsed time.
+
+        A marker is the user's own label for what they were doing at that
+        moment (for example "Hangerő FEL + bedugás"). Only the label text and
+        the two timestamps are kept.
+        """
+        text = sanitize_metadata(label)
+        if text:
+            text = text[:MARKER_MAX_CHARS]
+        if not text:
+            return False
+        if len(self.markers) >= MAX_MARKERS:
+            self.markers_dropped += 1
+            return False
+        self.markers.append({
+            "sequence": len(self.markers) + 1,
+            "utc": utc.isoformat(),
+            "elapsed_seconds": round(max(0.0, elapsed), 6),
+            "label": text,
+        })
+        return True
 
     def _info(self, info: Optional[dict]) -> dict:
         info = info or {}
@@ -468,6 +496,38 @@ class WindowsPnpBackend:
         return info
 
 
+def annotate_sessions_with_markers(sessions: list[dict], markers: list[dict]) -> None:
+    """Attach the operator marker that was active when a window opened.
+
+    For every session this records the most recent marker at or before the
+    session start, the seconds between that marker and the window opening,
+    and any markers that fall inside the window. This is a timing aid only:
+    it cannot prove that a button press caused the USB mode.
+    """
+    if not markers:
+        return
+    ordered = sorted(markers, key=lambda m: m["elapsed_seconds"])
+    for session in sessions:
+        first = session.get("first_elapsed_seconds")
+        last = session.get("last_elapsed_seconds")
+        if first is None:
+            continue
+        preceding = None
+        inside = []
+        for marker in ordered:
+            if marker["elapsed_seconds"] <= first:
+                preceding = marker
+            elif last is not None and marker["elapsed_seconds"] <= last:
+                inside.append(marker["label"])
+        if preceding is None:
+            continue
+        session["preceding_marker_label"] = preceding["label"]
+        session["preceding_marker_elapsed_seconds"] = preceding["elapsed_seconds"]
+        session["seconds_after_marker"] = round(first - preceding["elapsed_seconds"], 6)
+        if inside:
+            session["markers_inside_window"] = inside
+
+
 def interpret(report: dict) -> list[str]:
     notes = [
         "Passzív Windows PnP/USB megfigyelés: a program nem nyitott meg eszközt és nem küldött USB/ADB/fastboot/MTK parancsot.",
@@ -479,6 +539,17 @@ def interpret(report: dict) -> list[str]:
                   or report.get("stop_reason") in ("error", "interrupted"))
     if incomplete:
         notes.append("A megfigyelés hiányos vagy hibás lehet; a negatív eredményt nem szabad bizonyítékként kezelni.")
+    if report.get("marker_reader_error"):
+        notes.append(
+            "A marker-beolvasó hibát jelzett, ezért a gombpróba időpontja hiányos lehet: "
+            f"{report['marker_reader_error']}"
+        )
+    if report.get("markers"):
+        notes.append(
+            f"Operátor-markerek rögzítve: {len(report['markers'])} db. A marker a pillanat, "
+            "amikor Entert nyomtál; a gombállapotot a marker szövege írja le, "
+            "a program azt nem látja."
+        )
     candidates = report.get("candidate_sessions", [])
     if candidates:
         notes.append("Jelölt USB módok látszottak; a következő lépés csak a napló elemzése után, külön jóváhagyással dönthető el.")
@@ -497,7 +568,8 @@ def build_report(tracker: UsbTracker, *, backend_name: str, requested_seconds: f
                  actual_seconds: float, started_utc: datetime, stopped_utc: datetime,
                  stop_reason: str, issue: Optional[str], initial_count: Optional[int],
                  final_count: Optional[int], snapshot_count: int, backend_errors: list[str],
-                 callback_errors: int, callback_dropped: int) -> dict:
+                 callback_errors: int, callback_dropped: int,
+                 marker_reader_error: Optional[str] = None) -> dict:
     candidate_sessions = [s for s in tracker.sessions if s["classification"] != "other_usb"]
     complete = (stop_reason == "completed" and not issue and not backend_errors
                 and callback_errors == 0 and callback_dropped == 0 and tracker.dropped_events == 0)
@@ -529,10 +601,18 @@ def build_report(tracker: UsbTracker, *, backend_name: str, requested_seconds: f
         "ignored_non_usb_events": tracker.ignored_non_usb,
         "events_recorded": len(tracker.events),
         "sessions_recorded": len(tracker.sessions),
+        "markers": list(tracker.markers),
+        "markers_recorded": len(tracker.markers),
+        "markers_dropped": tracker.markers_dropped,
+        "marker_reader_error": marker_reader_error,
         "candidate_sessions": candidate_sessions,
         "events": tracker.events,
         "sessions": tracker.sessions,
     }
+    annotate_sessions_with_markers(report["sessions"], report["markers"])
+    report["candidate_sessions"] = [
+        s for s in report["sessions"] if s["classification"] != "other_usb"
+    ]
     report["interpretation"] = interpret(report)
     return report
 
@@ -561,6 +641,17 @@ def render_text(report: dict) -> str:
         f"Rögzített események: {report['events_recorded']} | Munkamenetek: {report['sessions_recorded']}",
         f"Eldobott események: {report['dropped_events']} | Callback hiba/eldobott: {report['callback_errors']}/{report['callback_dropped']}",
         f"Nem USB események: {report['ignored_non_usb_events']}",
+        f"Operátor-markerek: {report.get('markers_recorded', 0)} | eldobott marker: {report.get('markers_dropped', 0)}",
+        "",
+        "Operátor-markerek (az a pillanat, amikor Entert nyomtál)",
+        "-" * 51,
+    ])
+    markers = report.get("markers") or []
+    if not markers:
+        lines.append("(nincs marker – a naplóban csak relatív idő van)")
+    for marker in markers:
+        lines.append(f"[{marker['elapsed_seconds']:9.3f}s] {marker['label']}")
+    lines.extend([
         "",
         "Jelölt munkamenetek",
         "-" * 18,
@@ -570,11 +661,18 @@ def render_text(report: dict) -> str:
     for session in report["candidate_sessions"]:
         duration = session["duration_seconds"]
         duration_text = "ismeretlen" if duration is None else f"{duration:.6f} s"
-        lines.append(
+        line = (
             f"{session['hardware_id']} | {session['classification']} | látható: {duration_text} | "
             f"ok: {session['end_reason']} | osztály: {session.get('device_class') or '-'} | "
             f"szolgáltatás: {session.get('service') or '-'}"
         )
+        if session.get("preceding_marker_label") is not None:
+            line += (f" | előző marker: \"{session['preceding_marker_label']}\""
+                     f" (+{session['seconds_after_marker']:.3f} s)")
+        if session.get("markers_inside_window"):
+            line += " | ablakon belül: " + ", ".join(
+                f"\"{label}\"" for label in session["markers_inside_window"])
+        lines.append(line)
     lines.extend(["", "Utolsó események (max. 50; teljes lista a JSON-ban)", "-" * 49])
     for event in report["events"][-50:]:
         lines.append(
@@ -637,9 +735,55 @@ def _append_issue(issue: Optional[str], message: str) -> str:
     return f"{issue}; {message}" if issue else message
 
 
+class MarkerReader(threading.Thread):
+    """Read operator markers from stdin while the observation runs.
+
+    Every line the user enters becomes an immediate timestamped marker: the
+    elapsed time and the UTC time are printed the moment Enter is pressed,
+    so no timing has to be remembered. An empty line gets an automatic label.
+    The reader never touches the USB or phone side.
+    """
+
+    def __init__(self, on_marker: Callable[[str], None], prompt: str = "marker> ",
+                 stream=None):
+        super().__init__(daemon=True, name="tcl505-marker-reader")
+        self.on_marker = on_marker
+        self.prompt = prompt
+        self.stream = stream
+        self._stop_event = threading.Event()
+        self.error: Optional[str] = None
+
+    def run(self) -> None:
+        stream = self.stream if self.stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        try:
+            while not self._stop_event.is_set():
+                if self._stop_event.is_set():
+                    break
+                print(self.prompt, end="", flush=True)
+                line = stream.readline()
+                if not line:
+                    break
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                # A line already read is still recorded: the operator pressed
+                # Enter before the observation window closed.
+                text = line.strip()
+                if not text:
+                    text = "marker"
+                self.on_marker(text)
+        except Exception as exc:  # stdin closed, not a terminal, etc.
+            self.error = f"{type(exc).__name__}: {exc}"
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
 def collect_watch(seconds: float, output_dir: Path, backend=None,
                   clock: Callable[[], float] = time.monotonic,
-                  utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> tuple[dict, Path, Path]:
+                  utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                  markers: bool = False,
+                  marker_reader: Optional[MarkerReader] = None,
+                  marker_stream=None) -> tuple[dict, Path, Path]:
     backend = backend if backend is not None else WindowsPnpBackend()
     tracker = UsbTracker()
     started_clock = clock()
@@ -659,6 +803,23 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
             if action_name in ("enumerated", "started") and parse_usb_instance(instance_id) is not None:
                 info = backend.describe(instance_id)
             tracker.observe(action_name, instance_id, monotonic - started_clock, event_utc, info, "notification")
+
+    def record_marker(text: str) -> None:
+        elapsed = clock() - started_clock
+        stamp = utc_now()
+        if tracker.add_marker(text, elapsed, stamp):
+            print(f"[{elapsed:9.3f}s] marker: {text} ({stamp.isoformat(timespec='seconds')})", flush=True)
+        else:
+            print(f"[{elapsed:9.3f}s] marker eldobva: {text}", flush=True)
+
+    if marker_reader is None and markers:
+        marker_reader = MarkerReader(record_marker, stream=marker_stream)
+    if marker_reader is not None:
+        try:
+            marker_reader.start()
+        except Exception as exc:
+            issue = _append_issue(issue, f"marker_reader: {type(exc).__name__}: {exc}")
+            marker_reader = None
 
     try:
         backend.start()
@@ -689,6 +850,15 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
         stop_reason = "error"
         issue = _append_issue(issue, f"{type(exc).__name__}: {exc}")
     finally:
+        if marker_reader is not None:
+            try:
+                # Let a piped or file stream reach EOF and record its last
+                # lines first; an interactive terminal read just times out and
+                # is abandoned as a daemon thread after stop().
+                marker_reader.join(timeout=0.3)
+                marker_reader.stop()
+            except Exception as exc:
+                issue = _append_issue(issue, f"marker_reader_stop: {type(exc).__name__}: {exc}")
         try:
             backend.stop()
         except Exception as exc:
@@ -718,6 +888,7 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
             backend_errors=list(getattr(backend, "errors", [])),
             callback_errors=int(getattr(backend, "callback_errors", 0)),
             callback_dropped=int(getattr(backend, "callback_dropped", 0)),
+            marker_reader_error=(marker_reader.error if marker_reader is not None else None),
         )
         bundle, _manifest, zip_path = write_bundle(report, output_dir)
     return report, bundle, zip_path
@@ -730,6 +901,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--seconds", type=float, default=DEFAULT_SECONDS,
                         help=f"Megfigyelési idő másodpercben ({MIN_SECONDS:g}–{MAX_SECONDS:g}, alap: {DEFAULT_SECONDS:g}).")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "reports")
+    parser.add_argument("--no-markers", action="store_true",
+                        help="Ne olvasson markereket a billentyuzetrol (kimenet atiranyitasakor).")
     args = parser.parse_args(argv)
     if not math.isfinite(args.seconds) or not MIN_SECONDS <= args.seconds <= MAX_SECONDS:
         parser.error(f"--seconds: {MIN_SECONDS:g} és {MAX_SECONDS:g} közötti véges érték szükséges.")
@@ -739,7 +912,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         print(f"Passzív USB/PnP figyelés indul ({args.seconds:g} s). Ctrl+C: leállítás és részleges jelentés.")
         print("A program nem nyit meg eszközt, nem telepít drivert és nem indítja újra a telefont.")
-        report, bundle, zip_path = collect_watch(args.seconds, args.output_dir.expanduser().resolve())
+        if not args.no_markers:
+            print("MARKER: minden gombproba pillanataban nyomj Entert, es irj be egy rovid cimket,")
+            print("        pl. 'Vol+ bedugas' vagy 'gomb nelkul'. A program azonnal kiirja az idopontot.")
+            print("        A markerek a jelentésben az USB-ablakokhoz lesznek rendelve.")
+        report, bundle, zip_path = collect_watch(
+            args.seconds, args.output_dir.expanduser().resolve(),
+            markers=not args.no_markers,
+        )
     except (OSError, ValueError) as exc:
         print(f"Nem sikerült a jelentés elkészítése: {exc}", file=sys.stderr)
         return 2

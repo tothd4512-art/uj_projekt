@@ -189,6 +189,34 @@ neked kell kézzel beállítanod; a program nem próbál gombkombinációkat.
 4. A program a végén `reports\tcl505-usb-<azonosító>` mappát és azonos nevű
    `.zip` fájlt készít. A ZIP feltölthető elemzésre.
 
+### Markerek: ne kelljen fejből jegyezni az időpontot
+
+A figyelő futása közben a program **folyamatosan vár egy Enterre**. Amikor
+Entert nyomsz, a program **azonnal** kiírja a mérés kezdetétől számított
+másodpercet és az UTC-időt, és elmenti a marker szövegét. Nem kell a futás
+után visszaemlékezned, mikor melyik gombot nyomtad.
+
+```text
+marker> [   31.421s] marker: Vol+ bedugas (2026-11-13T10:04:17+00:00)
+```
+
+A marker szövegét a futás után is látni fogod a `report.txt`-ben:
+
+- **Operátor-markerek** szakasz: a markerek időrendben, a mérés kezdetétől
+  számított másodperccel;
+- **Jelölt munkamenetek**: minden USB-ablak mellett az az utolsó marker,
+  amely az ablak **előtt** volt (`előző marker: "Vol+ bedugas" (+2.6 s)`),
+  és azok a markerek, amelyek az ablakon **belül** estek.
+
+Az asszociáció időzítési segítség, nem bizonyíték: a program nem látja a
+gombokat, csak azt, hogy te mikor nyomtál Entert. Ha egy próbánál két ablak
+is megjelenik, mindkettő ugyanazt a markert kapja — ezért érdemes próbánként
+egy markert tenni, és a próbák között teljesen kikapcsolni a telefont.
+
+Ha a kimenetet fájlba irányítod, vagy nem interaktív a terminál, használd a
+`--no-markers` kapcsolót. Ilyenkor a jelentés a régi, csak relatív időt
+tartalmazó formában készül.
+
 ### Mit rögzít?
 
 - Windows PnP események: eszköz megjelenése (`enumerated`/`started`), eltűnése
@@ -196,6 +224,9 @@ neked kell kézzel beállítanod; a program nem próbál gombkombinációkat.
 - USB azonosítók: `VID`, `PID`, opcionális `MI`, busz; ezekből származó
   **jelölt** osztályozás (MTK BROM / preloader / preloader-vagy-DA / TCL ADB).
 - Láthatósági időtartam munkamenetenként, UTC és relatív időbélyeggel.
+- Operátor-markerek: a futás közben Enterrel jelzett pillanatok szövege és
+  időpontja, valamint ezek hozzárendelése az USB-ablakokhoz (időzítési
+  segítség, nem bizonyíték).
 - Eszközleírás, osztály, szolgáltatás (driver) metaadat – redakció után.
 
 Az eszköz instance-azonosítója/serialja **nem kerül a jelentésbe**; csak egy
@@ -343,9 +374,10 @@ szimulált Windows PnP backenddel futnak:
 py -3 -m unittest -v test_tcl505_probe.py test_tcl505_files.py test_tcl505_usb_watch.py
 ```
 
-A 0.4.0 csomagból 95 offline teszt futott le Linux/Python 3.11 környezetben
-(33 usb_watch, benne az `0E8D:201C` LK fastboot osztályozás és a hozzá tartozó
-értelmezési megjegyzés tesztje).
+A 0.4.1 csomagból 107 offline teszt futott le Linux/Python 3.11 környezetben
+(45 usb_watch: az `0E8D:201C` LK fastboot osztályozás, a hozzá tartozó
+értelmezési megjegyzés, valamint az operátor-markerek – szöveg, cap, redakció,
+ablak-hozzárendelés – tesztjei).
 A 0.3.0 ADB diagnosztika és fájlmásoló 2026-11-12-én valós T509K-n, felhasználói
 Windows/USB környezetben sikeres jelentést készített. Ugyanekkor valós
 bootloader-fastboot lekérdezés is történt (`is-userspace=no`); a 0.3.1 a nyers

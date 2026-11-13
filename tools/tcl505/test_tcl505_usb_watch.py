@@ -303,6 +303,104 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(saved["schema_version"], watch.REPORT_SCHEMA)
 
 
+class MarkerTests(unittest.TestCase):
+    def test_marker_records_elapsed_utc_and_label(self):
+        tracker = watch.UsbTracker(salt="s")
+        self.assertTrue(tracker.add_marker("Vol+ bedugas", 12.5, utc(12.5)))
+        marker = tracker.markers[0]
+        self.assertEqual(marker["label"], "Vol+ bedugas")
+        self.assertAlmostEqual(marker["elapsed_seconds"], 12.5)
+        self.assertEqual(marker["utc"], utc(12.5).isoformat())
+
+    def test_empty_or_whitespace_marker_rejected(self):
+        tracker = watch.UsbTracker(salt="s")
+        for value in ("", "   ", "\x00", None):
+            self.assertFalse(tracker.add_marker(value, 1.0, utc(1.0)))
+        self.assertEqual(tracker.markers, [])
+
+    def test_marker_label_is_sanitized_and_capped(self):
+        tracker = watch.UsbTracker(salt="s")
+        tracker.add_marker("a" * 400, 1.0, utc(1.0))
+        self.assertLessEqual(len(tracker.markers[0]["label"]), watch.MARKER_MAX_CHARS)
+        tracker2 = watch.UsbTracker(salt="s")
+        tracker2.add_marker("x\x01y\x02", 1.0, utc(1.0))
+        self.assertNotIn("\x01", tracker2.markers[0]["label"])
+
+    def test_marker_cap_drops_extra(self):
+        tracker = watch.UsbTracker(salt="s")
+        for index in range(watch.MAX_MARKERS + 3):
+            tracker.add_marker(f"m{index}", float(index), utc(index))
+        self.assertEqual(len(tracker.markers), watch.MAX_MARKERS)
+        self.assertEqual(tracker.markers_dropped, 3)
+
+    def test_sessions_are_annotated_with_preceding_marker(self):
+        tracker = watch.UsbTracker(salt="s")
+        tracker.add_marker("gomb nelkul, bedugas", 5.0, utc(5.0))
+        tracker.observe("enumerated", PRELOADER, 9.0, utc(9.0))
+        tracker.observe("removed", PRELOADER, 11.5, utc(11.5))
+        tracker.add_marker("Vol+ bedugas", 30.0, utc(30.0))
+        tracker.observe("enumerated", "USB\\VID_0E8D&PID_201C\\S", 31.0, utc(31.0))
+        tracker.observe("removed", "USB\\VID_0E8D&PID_201C\\S", 35.0, utc(35.0))
+        tracker.finalize(40.0, utc(40.0))
+        report = watch.build_report(
+            tracker, backend_name="fake", requested_seconds=40.0, actual_seconds=40.0,
+            started_utc=NOW, stopped_utc=utc(40.0), stop_reason="completed", issue=None,
+            initial_count=0, final_count=0, snapshot_count=41, backend_errors=[],
+            callback_errors=0, callback_dropped=0)
+        first, second = report["candidate_sessions"]
+        self.assertEqual(first["preceding_marker_label"], "gomb nelkul, bedugas")
+        self.assertAlmostEqual(first["seconds_after_marker"], 4.0)
+        self.assertEqual(second["preceding_marker_label"], "Vol+ bedugas")
+        self.assertAlmostEqual(second["seconds_after_marker"], 1.0)
+        text = watch.render_text(report)
+        self.assertIn("gomb nelkul, bedugas", text)
+        self.assertIn("Vol+ bedugas", text)
+
+    def test_marker_inside_window_is_listed(self):
+        tracker = watch.UsbTracker(salt="s")
+        tracker.add_marker("start", 1.0, utc(1.0))
+        tracker.observe("enumerated", PRELOADER, 2.0, utc(2.0))
+        tracker.add_marker("megjelent", 3.0, utc(3.0))
+        tracker.observe("removed", PRELOADER, 4.0, utc(4.0))
+        tracker.finalize(5.0, utc(5.0))
+        report = watch.build_report(
+            tracker, backend_name="fake", requested_seconds=5.0, actual_seconds=5.0,
+            started_utc=NOW, stopped_utc=utc(5.0), stop_reason="completed", issue=None,
+            initial_count=0, final_count=0, snapshot_count=6, backend_errors=[],
+            callback_errors=0, callback_dropped=0)
+        self.assertEqual(report["candidate_sessions"][0]["markers_inside_window"], ["megjelent"])
+
+    def test_report_without_markers_still_renders(self):
+        report = make_report()
+        self.assertEqual(report["markers"], [])
+        self.assertIn("Operátor-markerek", watch.render_text(report))
+
+    def test_marker_reader_error_is_reported(self):
+        report = watch.build_report(
+            watch.UsbTracker(salt="s"), backend_name="fake", requested_seconds=1.0,
+            actual_seconds=1.0, started_utc=NOW, stopped_utc=utc(1.0),
+            stop_reason="completed", issue=None, initial_count=0, final_count=0,
+            snapshot_count=2, backend_errors=[], callback_errors=0, callback_dropped=0,
+            marker_reader_error="OSError: stdin lezarva")
+        self.assertTrue(any("marker-beolvasó" in note for note in report["interpretation"]))
+
+    def test_marker_reader_parses_lines_without_device_access(self):
+        seen = []
+        stream = io.BytesIO(b"Vol+ bedugas\n\ngomb nelkul\n")
+        reader = watch.MarkerReader(seen.append, prompt="", stream=stream)
+        reader.run()
+        self.assertEqual(seen, ["Vol+ bedugas", "marker", "gomb nelkul"])
+        self.assertIsNone(reader.error)
+
+    def test_marker_reader_survives_closed_stream(self):
+        class Broken:
+            def readline(self):
+                raise OSError("nincs stdin")
+        reader = watch.MarkerReader(lambda _: None, prompt="", stream=Broken())
+        reader.run()
+        self.assertIn("OSError", reader.error)
+
+
 class CollectionTests(unittest.TestCase):
     def collect(self, backend, seconds=1.0):
         clock = FakeClock()
@@ -326,6 +424,34 @@ class CollectionTests(unittest.TestCase):
         self.assertIn("mediatek_brom_candidate", classifications)
         self.assertTrue(zip_path.is_file())
         self.assertNotIn("SERIAL-BROM-456", (bundle / "report.json").read_text(encoding="utf-8"))
+
+    def test_markers_disabled_by_default_in_collect_watch(self):
+        backend = FakeBackend(snapshots=[[TCL], [TCL], []])
+        report, _, _ = self.collect(backend)
+        self.assertEqual(report["markers"], [])
+        self.assertEqual(report["markers_recorded"], 0)
+
+    def test_real_marker_reader_feeds_collect_watch(self):
+        """End-to-end: a real MarkerReader line ends up in the packaged report."""
+        backend = FakeBackend(snapshots=[[TCL], [TCL], []])
+        clock = FakeClock()
+        backend.clock = clock
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        stream = io.BytesIO(b"Vol+ bedugas\ngomb nelkul\n")
+        report, bundle, _ = watch.collect_watch(
+            1.0, directory, backend=backend, clock=clock, utc_now=lambda: NOW,
+            markers=True, marker_stream=stream)
+        labels = [m["label"] for m in report["markers"]]
+        self.assertEqual(labels, ["Vol+ bedugas", "gomb nelkul"])
+        self.assertEqual(report["markers_recorded"], 2)
+        self.assertTrue(report["complete"])
+        saved = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([m["label"] for m in saved["markers"]],
+                         ["Vol+ bedugas", "gomb nelkul"])
+        text = (bundle / "report.txt").read_text(encoding="utf-8")
+        self.assertIn("Vol+ bedugas", text)
+        self.assertNotIn("SERIAL-TCL-123", text)
 
     def test_start_failure_still_writes_report(self):
         backend = FakeBackend(start_error=RuntimeError("PnP nem erheto el"))

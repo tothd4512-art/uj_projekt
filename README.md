@@ -11,7 +11,10 @@ A 0.3.1 a fastboot gyártói `unlock_ability = ...` válaszát is rögzítja, é
 nem szabványos 0/1 értéket nem tekinti feloldási engedélynek.
 A 0.4.0 passzív Windows USB/PnP figyelőt ad (`tcl505_usb_watch.py`): kikapcsolt
 telefon és kézi gombkombinációk mellett azt rögzíti, hogy megjelenik-e MediaTek
-preloader/BROM USB eszköz, milyen VID/PID-vel és mennyi ideig. Eszközhandle
+preloader/BROM USB eszköz, milyen VID/PID-vel és mennyi ideig. A 0.4.1
+operátor-markereket ad: a futás közben Enterrel jelzett pillanatokat azonnal
+kiírja, és a jelentésben az USB-ablakokhoz rendeli, így nem kell fejből
+jegyezni, melyik gombnyomás melyik módot hozta. Eszközhandle
 megnyitása, USB transzfer, driver telepítés, exploit/DA, partícióírás és
 újraindítás nélkül.
 2026-11-12-én saját T509K-ról származó ADB-, fájlmásolási és bootloader-fastboot

@@ -439,12 +439,40 @@ A 0.4.0 csomag új modulja a `tcl505_usb_watch.py` (v0.1.0), indítója a
   a mért ablakok preloader szintűek, BROM nem. A preloader **protokoll**
   (handshake, DA) továbbra sincs tesztelve.
 
+### Operátor-markerek – a „nem tudom, melyik gomb volt” probléma megoldása
+
+A 2026-11-13-i mérések visszatérő korlátja volt, hogy a jelentés csak a futás
+**végén** készül, és benne csak relatív másodpercek szerepelnek. A felhasználó
+ezért nem tudta megmondani, melyik USB-ablakhoz melyik gombnyomás tartozott.
+
+A 0.4.1 (modul 0.2.0) ezt a `MarkerReader` szállal oldja meg:
+
+- a figyelő futása közben a program folyamatosan olvassa a billentyűzetet;
+- minden Enter egy **marker**: a program azonnal kiírja a mérés kezdetétől
+  számított másodpercet és az UTC-időt, majd elmenti a beírt címkét;
+- a `report.json`-ba `markers` tömb kerül (max. 200 marker, 120 karakter,
+  redakció + vezérlőkarakter-tisztítás után);
+- a `report.txt`-ben külön **Operátor-markerek** szakasz van, és minden jelölt
+  munkamenet mellett szerepel az utolsó előtte lévő marker
+  (`előző marker: "Vol+ bedugas" (+2.6 s)`), valamint az ablakon belülre eső
+  markerek;
+- `--no-markers` kapcsoló, ha a kimenet fájlba megy vagy nincs interaktív
+  terminál; a marker-olvasó hibája nem teszi hiányossá a mérést, de külön
+  figyelmeztetés kerül az értelmezésbe.
+
+**Amit ez nem old meg:** a program továbbra sem látja a gombokat. A marker a
+te állításod arról, mit csináltál abban a pillanatban; az ablak-hozzárendelés
+időzítési segítség, nem bizonyíték. Ha egy próbában több ablak jelenik meg,
+mindegyik ugyanazt a markert kapja.
+
 ### Tesztelés
 
-A 0.4.0 csomag **95 offline teszt** futott le Linux/Python 3.11 környezetben
-(47 probe + 15 files + 33 usb_watch). A USB-figyelő 33 tesztje szimulált PnP
+A 0.4.1 csomag **107 offline teszt** futott le Linux/Python 3.11 környezetben
+(47 probe + 15 files + 45 usb_watch). A USB-figyelő 45 tesztje szimulált PnP
 backenddel, órával és eseményekkel fut; Windows API hívás nem történik.
-A `.cmd` indító ASCII + CRLF ellenőrzése offline teszt része.
+A markereket 10 teszt fedi (szöveg, cap, redakció, ablak-hozzárendelés,
+zárt/hibás stdin, `--no-markers` alapértelmezés). A `.cmd` indító ASCII + CRLF
+ellenőrzése offline teszt része.
 
 ## Valós USB-figyelő mérések – 2026-11-13
 
@@ -595,7 +623,7 @@ jóváhagyást igénylő lépés.
 
 ## Tesztelési határ
 
-A 0.4.0 csomag 95 offline, szimulált eszközválaszos és szimulált PnP backendes
+A 0.4.1 csomag 107 offline, szimulált eszközválaszos és szimulált PnP backendes
 tesztje Linux/Python 3.11 alatt sikeres. 2026-11-12-én a felhasználó saját
 T509K-ján, Windows/USB környezetben az ADB diagnosztika, a célzott fájlmásolás
 és a csak olvasó bootloader-fastboot lekérdezés sikeres jelentést készített;

@@ -19,6 +19,8 @@ echo TCL 505 / T509K - PASSZIV USB/PNP FIGYELO
 echo Csak Windows PnP esemenyeket es VID/PID adatot figyel. Nem tolt fel.
 echo Nem nyit meg eszkozt, nem telepit drivert, nem ir es nem inditja ujra a telefont.
 echo A telefon modjat kezzel allitsd; a program nem probal gombkombinaciot.
+echo MARKER: minden gombproba pillanataban nyomj Entert es irj be rovid cimket.
+echo         A program azonnal kiirja az idopontot, es a vegen az USB-ablakokhoz rendeli.
 echo.
 %PY% "%~dp0tcl505_usb_watch.py" %*
 set "RESULT=%ERRORLEVEL%"
