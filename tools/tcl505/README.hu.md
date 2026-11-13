@@ -189,6 +189,22 @@ neked kell kézzel beállítanod; a program nem próbál gombkombinációkat.
 4. A program a végén `reports\tcl505-usb-<azonosító>` mappát és azonos nevű
    `.zip` fájlt készít. A ZIP feltölthető elemzésre.
 
+### Élő kijelzés: a program kiírja, amikor az eszköz megjelenik
+
+A figyelő futása közben **azonnal** kiírja az MTK/TCL eszközök megjelenését és
+eltűnését, a mérés kezdetétől számított másodperccel és a láthatósági idővel:
+
+```text
+marker> [   17.810s] MEGJELENT USB\VID_0E8D&PID_2000  (mediatek_preloader_candidate)  "MT65xx Preloader"
+[   18.000s] marker: Vol+ bedugas (2026-11-13T16:51:22+00:00)
+marker> [   20.310s] ELTUNT   USB\VID_0E8D&PID_2000  (mediatek_preloader_candidate)  (2.500 s)
+```
+
+Így nem kell a futás végére várni: rögtön látod, hogy az adott gombnyomás
+hozott-e egyáltalán USB-ablakot, és mennyi ideig tartott. Csak a jelölt
+eszközök (`0E8D:*`, `1BBB:*`) jelennek meg, hogy az egér/billentyűzet
+csatlakoztatása ne nyomja el a markert.
+
 ### Markerek: ne kelljen fejből jegyezni az időpontot
 
 A figyelő futása közben a program **folyamatosan vár egy Enterre**. Amikor
@@ -227,6 +243,8 @@ tartalmazó formában készül.
 - Operátor-markerek: a futás közben Enterrel jelzett pillanatok szövege és
   időpontja, valamint ezek hozzárendelése az USB-ablakokhoz (időzítési
   segítség, nem bizonyíték).
+- Élő kijelzés a futás alatt: `MEGJELENT` / `ELTUNT` sorok időbélyeggel és a
+  láthatósági idővel az MTK/TCL jelölt eszközökre.
 - Eszközleírás, osztály, szolgáltatás (driver) metaadat – redakció után.
 
 Az eszköz instance-azonosítója/serialja **nem kerül a jelentésbe**; csak egy
@@ -374,10 +392,10 @@ szimulált Windows PnP backenddel futnak:
 py -3 -m unittest -v test_tcl505_probe.py test_tcl505_files.py test_tcl505_usb_watch.py
 ```
 
-A 0.4.1 csomagból 107 offline teszt futott le Linux/Python 3.11 környezetben
-(45 usb_watch: az `0E8D:201C` LK fastboot osztályozás, a hozzá tartozó
-értelmezési megjegyzés, valamint az operátor-markerek – szöveg, cap, redakció,
-ablak-hozzárendelés – tesztjei).
+A 0.4.3 csomagból 118 offline teszt futott le Linux/Python 3.11 környezetben
+(56 usb_watch: az `0E8D:201C` LK fastboot osztályozás, az operátor-markerek –
+szöveg, cap, redakció, ablak-hozzárendelés –, az élő `MEGJELENT`/`ELTUNT`
+kijelzés és a leállítási sorrend tesztjei).
 A 0.3.0 ADB diagnosztika és fájlmásoló 2026-11-12-én valós T509K-n, felhasználói
 Windows/USB környezetben sikeres jelentést készített. Ugyanekkor valós
 bootloader-fastboot lekérdezés is történt (`is-userspace=no`); a 0.3.1 a nyers

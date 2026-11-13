@@ -401,6 +401,153 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("OSError", reader.error)
 
 
+class LiveEchoTests(unittest.TestCase):
+    def test_mtk_candidate_is_echoed_live(self):
+        out = io.StringIO()
+        seen = {}
+        with contextlib.redirect_stdout(out):
+            watch._echo_event("enumerated", watch.parse_usb_instance(PRELOADER), 17.81, seen,
+                              {"description": "MT65xx Preloader"})
+        text = out.getvalue()
+        self.assertIn("MEGJELENT", text)
+        self.assertIn("17.810", text)
+        self.assertIn("0E8D&PID_2000", text)
+        self.assertIn("mediatek_preloader_candidate", text)
+        self.assertIn("MT65xx Preloader", text)
+        self.assertNotIn("SERIAL-PRE-789", text)
+
+    def test_removal_echoes_visible_duration(self):
+        out = io.StringIO()
+        seen = {}
+        with contextlib.redirect_stdout(out):
+            watch._echo_event("enumerated", watch.parse_usb_instance(PRELOADER), 17.81, seen)
+            watch._echo_event("started", watch.parse_usb_instance(PRELOADER), 17.82, seen)
+            watch._echo_event("removed", watch.parse_usb_instance(PRELOADER), 20.31, seen)
+        text = out.getvalue()
+        self.assertEqual(text.count("MEGJELENT"), 1)  # started is not repeated
+        self.assertIn("ELTUNT", text)
+        self.assertIn("2.500 s", text)
+
+    def test_ordinary_usb_is_not_echoed(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            watch._echo_event("enumerated", {"bus": "USB", "vid": "8087", "pid": "0026",
+                                             "mi": None, "hardware_id": "USB\\VID_8087&PID_0026"}, 1.0, {})
+        self.assertEqual(out.getvalue(), "")
+
+    def test_lk_fastboot_is_echoed(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            watch._echo_event("enumerated", watch.parse_usb_instance(
+                "USB\\VID_0E8D&PID_201C\\S"), 107.9, {})
+        self.assertIn("mediatek_lk_fastboot_candidate", out.getvalue())
+
+    def test_collect_watch_echoes_only_when_asked(self):
+        backend = FakeBackend(snapshots=[[TCL], [TCL], []],
+                              events=[(0.5, utc(0.5), 7, PRELOADER),
+                                      (0.9, utc(0.9), 9, PRELOADER)])
+        clock = FakeClock()
+        backend.clock = clock
+        self.addCleanup(lambda: None)
+        for echo, expected in ((False, False), (True, True)):
+            directory = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+            inner = FakeBackend(snapshots=[[TCL], [TCL], []],
+                                events=[(0.5, utc(0.5), 7, PRELOADER),
+                                        (0.9, utc(0.9), 9, PRELOADER)])
+            inner.clock = FakeClock()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                watch.collect_watch(1.0, directory, backend=inner, clock=inner.clock,
+                                    utc_now=lambda: NOW, echo=echo)
+            self.assertEqual("MEGJELENT" in out.getvalue(), expected)
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_cancel_stops_reading_and_marks_the_reader(self):
+        seen = []
+        stream = io.BytesIO(b"a\n")
+        reader = watch.MarkerReader(seen.append, prompt="", stream=stream)
+        reader.run()
+        self.assertEqual(seen, ["a"])
+        reader.cancel()
+        self.assertTrue(reader._cancelled)
+        self.assertTrue(reader._stop_event.is_set())
+
+    def test_closed_stream_blocks_instead_of_reading(self):
+        import threading
+        self.assertIsInstance(watch._CLOSED_STREAM, watch._ClosedStream)
+        thread = threading.Thread(target=watch._CLOSED_STREAM.readline, daemon=True)
+        thread.start()
+        thread.join(timeout=0.2)
+        self.assertTrue(thread.is_alive())  # parked, never returns data
+
+    def test_reader_does_not_read_after_cancel(self):
+        calls = []
+
+        class CountingStream:
+            def readline(self):
+                calls.append(1)
+                return b"x\n" if len(calls) == 1 else b""
+
+        reader = watch.MarkerReader(lambda _: None, prompt="", stream=CountingStream())
+        reader.run()
+        self.assertEqual(len(calls), 2)  # first line, then EOF
+        reader.cancel()
+        before = len(calls)
+        reader.run()  # a cancelled reader must not read again
+        self.assertEqual(len(calls), before)
+
+    def test_collect_watch_cancels_the_reader(self):
+        class FakeReader:
+            error = None
+            def __init__(self):
+                self.cancelled = False
+                self.started = False
+            def start(self):
+                self.started = True
+            def join(self, timeout=None):
+                return None
+            def cancel(self):
+                self.cancelled = True
+        reader = FakeReader()
+        backend = FakeBackend(snapshots=[[TCL], [TCL], []])
+        clock = FakeClock()
+        backend.clock = clock
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        watch.collect_watch(1.0, directory, backend=backend, clock=clock,
+                            utc_now=lambda: NOW, marker_reader=reader)
+        self.assertTrue(reader.started)
+        self.assertTrue(reader.cancelled)
+
+    def test_main_exits_via_os_exit_when_marker_thread_ran(self):
+        report = make_report()
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle"
+            bundle.mkdir()
+            with mock.patch.object(watch.sys, "platform", "win32"), \
+                    mock.patch.object(watch, "collect_watch", return_value=(report, bundle, Path(directory) / "b.zip")), \
+                    mock.patch.object(watch, "_MARKER_THREAD_STARTED", True), \
+                    mock.patch.object(watch.os, "_exit") as exit_mock, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                watch.main(["--output-dir", directory])
+            exit_mock.assert_called_once_with(0)
+
+    def test_main_returns_0_without_marker_thread(self):
+        report = make_report()
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle"
+            bundle.mkdir()
+            with mock.patch.object(watch.sys, "platform", "win32"), \
+                    mock.patch.object(watch, "collect_watch", return_value=(report, bundle, Path(directory) / "b.zip")), \
+                    mock.patch.object(watch, "_MARKER_THREAD_STARTED", False), \
+                    mock.patch.object(watch.os, "_exit") as exit_mock, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(watch.main(["--output-dir", directory]), 0)
+            exit_mock.assert_not_called()
+
+
 class CollectionTests(unittest.TestCase):
     def collect(self, backend, seconds=1.0):
         clock = FakeClock()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import json
 import math
 import queue
@@ -25,7 +26,7 @@ from typing import Callable, Optional
 
 from tcl505_probe import redact
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 REPORT_SCHEMA = 1
 MANIFEST_SCHEMA = 1
 MAX_EVENTS = 10000
@@ -35,6 +36,7 @@ MIN_SECONDS = 1.0
 MAX_SECONDS = 600.0
 SNAPSHOT_INTERVAL = 1.0
 DRAIN_TIMEOUT = 0.2
+_MARKER_THREAD_STARTED = False
 MAX_MARKERS = 200
 MARKER_MAX_CHARS = 120
 
@@ -735,6 +737,17 @@ def _append_issue(issue: Optional[str], message: str) -> str:
     return f"{issue}; {message}" if issue else message
 
 
+class _ClosedStream:
+    """Stand-in stream used after cancel(); readline() blocks forever."""
+
+    def readline(self) -> bytes:
+        threading.Event().wait()
+        return b""
+
+
+_CLOSED_STREAM = _ClosedStream()
+
+
 class MarkerReader(threading.Thread):
     """Read operator markers from stdin while the observation runs.
 
@@ -751,14 +764,13 @@ class MarkerReader(threading.Thread):
         self.prompt = prompt
         self.stream = stream
         self._stop_event = threading.Event()
+        self._cancelled = False
         self.error: Optional[str] = None
 
     def run(self) -> None:
         stream = self.stream if self.stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
         try:
-            while not self._stop_event.is_set():
-                if self._stop_event.is_set():
-                    break
+            while not self._stop_event.is_set() and not self._cancelled:
                 print(self.prompt, end="", flush=True)
                 line = stream.readline()
                 if not line:
@@ -777,13 +789,52 @@ class MarkerReader(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def cancel(self) -> None:
+        """Abandon the reader without touching stdin again.
+
+        Called at shutdown: the blocked daemon thread stays parked in
+        readline(), but no further read is attempted, so Python's
+        buffered-stdin lock cannot collide with interpreter finalisation
+        (that collision is the _enter_buffered_busy fatal error).
+        """
+        self._cancelled = True
+        self.stop()
+
+
+def _echo_event(action: str, parsed: dict, elapsed: float, first_seen: dict,
+                info: Optional[dict] = None) -> None:
+    """Print interesting USB events while the observation is running.
+
+    Only MTK/TCL candidates are echoed, so ordinary mouse/keyboard churn does
+    not scroll the marker prompt away. Every printed line is timestamped, and
+    on removal the visible duration is computed, which is exactly the piece of
+    timing the user otherwise has to reconstruct afterwards. Nothing is opened
+    or sent.
+    """
+    classification = classify_usb(parsed["vid"], parsed["pid"])
+    if classification == "other_usb":
+        return
+    key = parsed["hardware_id"]
+    if action == "removed":
+        start = first_seen.pop(key, None)
+        held = f"  ({elapsed - start:.3f} s)" if start is not None else ""
+        print(f"[{elapsed:9.3f}s] ELTUNT   {key}  ({classification}){held}", flush=True)
+        return
+    if key in first_seen:
+        return
+    first_seen[key] = elapsed
+    description = (info or {}).get("description") or ""
+    tail = f'  "{description}"' if description else ""
+    print(f"[{elapsed:9.3f}s] MEGJELENT {key}  ({classification}){tail}", flush=True)
+
 
 def collect_watch(seconds: float, output_dir: Path, backend=None,
                   clock: Callable[[], float] = time.monotonic,
                   utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                   markers: bool = False,
                   marker_reader: Optional[MarkerReader] = None,
-                  marker_stream=None) -> tuple[dict, Path, Path]:
+                  marker_stream=None,
+                  echo: bool = False) -> tuple[dict, Path, Path]:
     backend = backend if backend is not None else WindowsPnpBackend()
     tracker = UsbTracker()
     started_clock = clock()
@@ -794,15 +845,21 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
     final_count = None
     snapshot_count = 0
 
+    live_seen: dict[str, float] = {}
+
     def process_events(items: list[tuple]) -> None:
         for monotonic, event_utc, action, instance_id in items:
             action_name = CM_ACTIONS.get(int(action))
             if action_name is None:
                 continue
             info = None
-            if action_name in ("enumerated", "started") and parse_usb_instance(instance_id) is not None:
+            parsed = parse_usb_instance(instance_id)
+            if action_name in ("enumerated", "started") and parsed is not None:
                 info = backend.describe(instance_id)
-            tracker.observe(action_name, instance_id, monotonic - started_clock, event_utc, info, "notification")
+            elapsed = monotonic - started_clock
+            if echo and parsed is not None:
+                _echo_event(action_name, parsed, elapsed, live_seen, info)
+            tracker.observe(action_name, instance_id, elapsed, event_utc, info, "notification")
 
     def record_marker(text: str) -> None:
         elapsed = clock() - started_clock
@@ -817,6 +874,7 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
     if marker_reader is not None:
         try:
             marker_reader.start()
+            globals()["_MARKER_THREAD_STARTED"] = True
         except Exception as exc:
             issue = _append_issue(issue, f"marker_reader: {type(exc).__name__}: {exc}")
             marker_reader = None
@@ -852,11 +910,10 @@ def collect_watch(seconds: float, output_dir: Path, backend=None,
     finally:
         if marker_reader is not None:
             try:
-                # Let a piped or file stream reach EOF and record its last
-                # lines first; an interactive terminal read just times out and
-                # is abandoned as a daemon thread after stop().
+                # A piped/file stream reaches EOF and delivers its last lines;
+                # an interactive terminal read times out and is cancelled.
                 marker_reader.join(timeout=0.3)
-                marker_reader.stop()
+                marker_reader.cancel()
             except Exception as exc:
                 issue = _append_issue(issue, f"marker_reader_stop: {type(exc).__name__}: {exc}")
         try:
@@ -909,6 +966,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if sys.platform != "win32":
         print("Ez a figyelő Windows 10/11 PnP API-t használ; Linux alatt nem futtatható.", file=sys.stderr)
         return 2
+    report = bundle = zip_path = None
     try:
         print(f"Passzív USB/PnP figyelés indul ({args.seconds:g} s). Ctrl+C: leállítás és részleges jelentés.")
         print("A program nem nyit meg eszközt, nem telepít drivert és nem indítja újra a telefont.")
@@ -919,6 +977,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         report, bundle, zip_path = collect_watch(
             args.seconds, args.output_dir.expanduser().resolve(),
             markers=not args.no_markers,
+            echo=True,
         )
     except (OSError, ValueError) as exc:
         print(f"Nem sikerült a jelentés elkészítése: {exc}", file=sys.stderr)
@@ -926,7 +985,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(render_text(report))
     print(f"Jelentésmappa: {bundle}\nSzöveges jelentés: {bundle / 'report.txt'}\nJSON jelentés: {bundle / 'report.json'}")
     print(f"Feltölthető ZIP: {zip_path}")
-    return 0 if report.get("complete") else 1
+    sys.stdout.flush()
+    code = 0 if report.get("complete") else 1
+    if globals().get("_MARKER_THREAD_STARTED"):
+        # The marker thread is parked in stdin.readline(). Do not let the
+        # interpreter finalise its buffered stdin under that thread (that is
+        # the _enter_buffered_busy crash); leave the process immediately.
+        os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

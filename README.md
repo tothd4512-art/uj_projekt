@@ -14,7 +14,9 @@ telefon és kézi gombkombinációk mellett azt rögzíti, hogy megjelenik-e Med
 preloader/BROM USB eszköz, milyen VID/PID-vel és mennyi ideig. A 0.4.1
 operátor-markereket ad: a futás közben Enterrel jelzett pillanatokat azonnal
 kiírja, és a jelentésben az USB-ablakokhoz rendeli, így nem kell fejből
-jegyezni, melyik gombnyomás melyik módot hozta. Eszközhandle
+jegyezni, melyik gombnyomás melyik módot hozta. A 0.4.3 emellett futás közben
+is kiírja a jelölt eszközök `MEGJELENT`/`ELTUNT` eseményeit a láthatósági
+idővel, és javítja a leálláskori `_enter_buffered_busy` összeomlást. Eszközhandle
 megnyitása, USB transzfer, driver telepítés, exploit/DA, partícióírás és
 újraindítás nélkül.
 2026-11-12-én saját T509K-ról származó ADB-, fájlmásolási és bootloader-fastboot

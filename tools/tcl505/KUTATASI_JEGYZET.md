@@ -465,14 +465,76 @@ te állításod arról, mit csináltál abban a pillanatban; az ablak-hozzárend
 időzítési segítség, nem bizonyíték. Ha egy próbában több ablak jelenik meg,
 mindegyik ugyanazt a markert kapja.
 
+### 4. futás (16:51:22–16:53:23 UTC, 120 s) – markerek élesben
+
+Az első markerrel végzett valós futás (`0e8d`-jelöltek, egy marker):
+
+| # | látható ablak (rel.) | VID:PID | osztály | hossz | marker-kapcsolat |
+|---|---|---|---|---|---|
+| 1 | 17.81 – 20.31 | `0E8D:2000` | USBDevice / WinUSB | 2.50 s | nincs előtte marker |
+| 2 | 43.58 – 46.10 | `0E8D:2000` | USBDevice / WinUSB | 2.52 s | `Vol+ bedugas` (+13.29 s) |
+| 3 | 65.24 – 67.75 | `0E8D:2000` | USBDevice / WinUSB | 2.52 s | `Vol+ bedugas` (+34.94 s) |
+| 4 | 92.16 – 111.55 | `0E8D:20FF` | HIDClass / HidUsb | **19.40 s** | `Vol+ bedugas` (+61.86 s) |
+
+`0E8D:0003` (BROM) nem jelent meg; a marker 30.295 s-nál volt, az első ablak
+17.81 s-nál (tehát a marker előtt) kezdődött.
+
+**Új megfigyelés: a `20FF` ablak hossza 0.89–3.80 s helyett 19.4 s lett.**
+A korábbi futásokban a `20FF` mindig 1–4 s-ig látszott; itt 19.4 s-ig. Ez
+megerősíti, hogy a `20FF` HID-osztályú mód **képes hosszan fennmaradni**, és
+hogy a láthatósági idő nagyon változó — a „rövid ablak” nem törvényszerű.
+Ez még mindig **nem BROM**: a `20FF` preloader-oldali HID-mód.
+
+### Hibajavítás: leállási összeomlás (`_enter_buffered_busy`)
+
+A 4. futás végén a program ezzel állt le:
+
+```text
+Fatal Python error: _enter_buffered_busy: could not acquire lock for
+<_io.BufferedReader name='<stdin>'> at interpreter shutdown, possibly due to
+daemon threads
+```
+
+**Ok:** a marker-olvasó daemon szál a `sys.stdin.buffer.readline()`-ben várakozik;
+az interpreter leállásakor a `sys.stdin` pufferét akarja lezárni, de a zár a
+szálé. Ezt Linuxon FIFO-val reprodukáltam (parkolt daemon szál + normál kilépés
+→ ugyanaz a fatal error), majd a javítással ugyanabban a szcenárióban nem
+jelentkezik.
+
+**Javítás (0.4.3, modul 0.3.0):**
+
+1. a `collect_watch` a `finally`-ban előbb `join(0.3)`-mal behúzza a már
+   beolvasott sorokat, majd `cancel()`-t hív;
+2. a `cancel()` beállít egy `_cancelled` jelzőt, így a szál **soha többé nem
+   olvas** a stdinről (a blokkolt `readline()` bent marad, de új olvasás nincs);
+3. a `main()` a jelentés kiírása után, ha marker-szál indult, `os._exit()`-tel
+   lép ki, így az interpreter már nem próbálja lezárni a `sys.stdin` puffert.
+
+A jelentés és a ZIP a hiba előtt is elkészült (`complete: true`), tehát adat
+nem veszett el — de a nem nulla kilépési kód és a hibaüzenet zavaró volt.
+
+### Élő kijelzés (0.4.3)
+
+A felhasználó visszajelzése nyomán a figyelő már **futás közben** kiírja a
+jelölt eszközök megjelenését és eltűnését, a láthatósági idővel:
+
+```text
+[   17.810s] MEGJELENT USB\VID_0E8D&PID_2000  (mediatek_preloader_candidate)  "MT65xx Preloader"
+[   20.310s] ELTUNT   USB\VID_0E8D&PID_2000  (mediatek_preloader_candidate)  (2.500 s)
+```
+
+Csak `0E8D:*`/`1BBB:*` eszközök jelennek meg, hogy a periféria-események ne
+nyomják el a marker-promptot.
+
 ### Tesztelés
 
-A 0.4.1 csomag **107 offline teszt** futott le Linux/Python 3.11 környezetben
-(47 probe + 15 files + 45 usb_watch). A USB-figyelő 45 tesztje szimulált PnP
+A 0.4.3 csomag **118 offline teszt** futott le Linux/Python 3.11 környezetben
+(47 probe + 15 files + 56 usb_watch). A USB-figyelő 56 tesztje szimulált PnP
 backenddel, órával és eseményekkel fut; Windows API hívás nem történik.
-A markereket 10 teszt fedi (szöveg, cap, redakció, ablak-hozzárendelés,
-zárt/hibás stdin, `--no-markers` alapértelmezés). A `.cmd` indító ASCII + CRLF
-ellenőrzése offline teszt része.
+A markereket, az élő kijelzést és a leállítási sorrendet 23 teszt fedi
+(szöveg, cap, redakció, ablak-hozzárendelés, zárt/hibás stdin,
+`--no-markers` alapértelmezés, `os._exit` ág, cancel utáni olvasásmentesség).
+A `.cmd` indító ASCII + CRLF ellenőrzése offline teszt része.
 
 ## Valós USB-figyelő mérések – 2026-11-13
 
@@ -623,7 +685,7 @@ jóváhagyást igénylő lépés.
 
 ## Tesztelési határ
 
-A 0.4.1 csomag 107 offline, szimulált eszközválaszos és szimulált PnP backendes
+A 0.4.3 csomag 118 offline, szimulált eszközválaszos és szimulált PnP backendes
 tesztje Linux/Python 3.11 alatt sikeres. 2026-11-12-én a felhasználó saját
 T509K-ján, Windows/USB környezetben az ADB diagnosztika, a célzott fájlmásolás
 és a csak olvasó bootloader-fastboot lekérdezés sikeres jelentést készített;
