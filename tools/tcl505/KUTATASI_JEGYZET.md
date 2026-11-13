@@ -441,8 +441,8 @@ A 0.4.0 csomag új modulja a `tcl505_usb_watch.py` (v0.1.0), indítója a
 
 ### Tesztelés
 
-A 0.4.0 csomag **94 offline teszt** futott le Linux/Python 3.11 környezetben
-(47 probe + 15 files + 32 usb_watch). A USB-figyelő 32 tesztje szimulált PnP
+A 0.4.0 csomag **95 offline teszt** futott le Linux/Python 3.11 környezetben
+(47 probe + 15 files + 33 usb_watch). A USB-figyelő 33 tesztje szimulált PnP
 backenddel, órával és eseményekkel fut; Windows API hívás nem történik.
 A `.cmd` indító ASCII + CRLF ellenőrzése offline teszt része.
 
@@ -538,9 +538,64 @@ következő döntési pont a preloader protokoll (mtkclient preloader-ág,
 `--preloader` / DA) elemzése — ez már eszközmegnyitással járó, külön
 jóváhagyást igénylő lépés, nem passzív megfigyelés.
 
+### 3. futás (10:03:46–10:05:46 UTC, 120 s) – LK fastboot ablak
+
+Kezdeti és végső USB eszköz: 5/5, pillanatkép: 121, esemény: 22,
+munkamenet: 11, eldobott esemény: 0, callback hiba: 0, `complete: true`.
+A baseline ismét tiszta (a telefon `1BBB:0C01`-je nem volt jelen).
+
+| # | látható ablak (rel.) | VID:PID | osztály / szolgáltatás | leírás | hossz |
+|---|---|---|---|---|---|
+| 1 | 9.00 – 11.50 | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.50 s |
+| 2 | 36.25 – 38.76 | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.51 s |
+| 3 | 63.03 – 63.93 | `0E8D:20FF` | HIDClass / HidUsb | USB beviteli eszköz | 0.89 s |
+| 4 | 74.55 – 77.06 | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.51 s |
+| 5 | 101.90 – 102.47 | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 0.57 s |
+| 6 | 107.92 – 111.83 | **`0E8D:201C`** | AndroidUsbDeviceClass / WinUSB | **Android Bootloader Interface** | 3.91 s |
+
+A felhasználó szerint ez a futás a **Hangerő FEL** gombos próbához tartozott.
+A napló maga nem tartalmaz gombcímkét, ezért a hat ablak és a konkrét
+gombállapot hozzárendelése továbbra sem izolált.
+
+**Új eredmény: `0E8D:201C` = MediaTek LK fastboot.** Három független forrás
+azonosítja így:
+
+- a `phildabill/onn-t405a-Bootloader-unlock` repó kifejezetten
+  „`0E8D:201C` = LK Fastboot”-ként tárgyalja, és a `getvar:is-userspace`
+  `OKAYno` válaszával különíti el az Android fastbootd-től;
+- az `Informatic/xiaomi-x04g-research` szerint a „Reboot to bootloader”
+  `0e8d:201c` eszközt ad (szemben a fastbootd `18d1:4ee0` azonosítójával);
+- a varaprasadh.dev Rabbit R1-esete `0e8d:201c`-t mutat, miközben a telefon
+  már fastboot módban volt.
+
+Ezen kívül a MediaTek `android_winusb.inf` a `201C`-t
+`%SingleAdbInterface%`-ként tartja nyilván „Android ADB Interface” néven, a
+Windows-eszközleírás pedig `Android Bootloader Interface` volt — a leírásnév
+önmagában nem dönti el a módot, a PID és a `getvar is-userspace` igen.
+
+**Következmény:** a bootloader-fastboot ezen a telefonon nem csak
+`adb reboot bootloader`-rel érhető el, hanem kézi gombkombinációval is. Ez
+fontos, mert a 0.3.1-ben mért `unlock_ability = 16777216` és a `secure=yes`
+bootloader-oldali állapot mostantól kézi úton is megközelíthető anélkül, hogy
+Androidot kellene bootolni. **Ez nem BROM**, és nem változtat azon, hogy a
+`16777216` nem AOSP `1`, tehát nem feloldási engedély.
+
+### Frissített következtetés a gombkombinációkról
+
+A három futás alapján a `0E8D:2000` preloader-ablak **gomb nélkül és
+hangerőgombokkal is** megjelenik; a `0E8D:201C` LK fastboot ablak egyszer,
+a Hangerő FEL-es próbában jelent meg. A `0E8D:0003` BROM egyik futásban sem
+jelent meg.
+
+A további lépés **nem** újabb vak gombpróba, hanem a címkézett futás
+(fenti táblázat, egy ablak = egy próba), mert enélkül nem lehet eldönteni,
+melyik kombináció melyik módot hozza. A BROM-út ezután is nyitott kérdés;
+a `0E8D:2000` preloader protokollja (mtkclient preloader-ág) külön,
+jóváhagyást igénylő lépés.
+
 ## Tesztelési határ
 
-A 0.4.0 csomag 94 offline, szimulált eszközválaszos és szimulált PnP backendes
+A 0.4.0 csomag 95 offline, szimulált eszközválaszos és szimulált PnP backendes
 tesztje Linux/Python 3.11 alatt sikeres. 2026-11-12-én a felhasználó saját
 T509K-ján, Windows/USB környezetben az ADB diagnosztika, a célzott fájlmásolás
 és a csak olvasó bootloader-fastboot lekérdezés sikeres jelentést készített;

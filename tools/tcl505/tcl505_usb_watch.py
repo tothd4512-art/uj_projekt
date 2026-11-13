@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from tcl505_probe import redact
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 REPORT_SCHEMA = 1
 MANIFEST_SCHEMA = 1
 MAX_EVENTS = 10000
@@ -52,6 +52,10 @@ DEVICE_PROPERTIES = {"description": 2, "service": 6, "device_class": 9}
 MTK_BROM_PIDS = frozenset(("0003",))
 MTK_PRELOADER_PIDS = frozenset(("2000", "201D", "20FF", "3000", "6000"))
 MTK_PRELOADER_OR_DA_PIDS = frozenset(("2001",))
+# 0E8D:201C is reported by several independent sources as MediaTek LK fastboot
+# (bootloader fastboot, not fastbootd). The definitive check stays a read-only
+# "getvar is-userspace", which this passive watcher never issues.
+MTK_LK_FASTBOOT_PIDS = frozenset(("201C",))
 TCL_ADB_PID = "0C01"  # this device's init.mt6765.usb.rc uses VID 0x1BBB / PID 0x0C01
 VID_RE = re.compile(r"(?i)\bVID_([0-9A-F]{4})\b")
 PID_RE = re.compile(r"(?i)\bPID_([0-9A-F]{4})\b")
@@ -91,6 +95,8 @@ def classify_usb(vid: str, pid: str) -> str:
             return "mediatek_preloader_candidate"
         if pid in MTK_PRELOADER_OR_DA_PIDS:
             return "mediatek_preloader_or_da_candidate"
+        if pid in MTK_LK_FASTBOOT_PIDS:
+            return "mediatek_lk_fastboot_candidate"
         return "mediatek_other_usb"
     if vid == "1BBB":
         return "tcl_adb_usb_candidate" if pid == TCL_ADB_PID else "tcl_other_usb"
@@ -476,8 +482,14 @@ def interpret(report: dict) -> list[str]:
     candidates = report.get("candidate_sessions", [])
     if candidates:
         notes.append("Jelölt USB módok látszottak; a következő lépés csak a napló elemzése után, külön jóváhagyással dönthető el.")
+        if any(s.get("classification") == "mediatek_lk_fastboot_candidate" for s in candidates):
+            notes.append(
+                "MediaTek LK fastboot jelölt (0E8D:201C) látszott: ez bootloader-fastboot lehet, "
+                "nem preloader/BROM. A bootloader- vagy fastbootd-mivolt csak külön, csak olvasó "
+                "getvar is-userspace lekérdezéssel dönthető el, amit ez a figyelő nem küld."
+            )
     elif not incomplete:
-        notes.append("Nem látszott ismert MTK BROM/preloader/DA vagy TCL ADB jelölt a rögzített ablakban.")
+        notes.append("Nem látszott ismert MTK BROM/preloader/DA, MTK LK fastboot vagy TCL ADB jelölt a rögzített ablakban.")
     return notes
 
 
@@ -722,7 +734,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not math.isfinite(args.seconds) or not MIN_SECONDS <= args.seconds <= MAX_SECONDS:
         parser.error(f"--seconds: {MIN_SECONDS:g} és {MAX_SECONDS:g} közötti véges érték szükséges.")
     if sys.platform != "win32":
-        print("Ez a figyelő Windows 10/11 PnP API-t használ; Linux/alatt nem futtatható.", file=sys.stderr)
+        print("Ez a figyelő Windows 10/11 PnP API-t használ; Linux alatt nem futtatható.", file=sys.stderr)
         return 2
     try:
         print(f"Passzív USB/PnP figyelés indul ({args.seconds:g} s). Ctrl+C: leállítás és részleges jelentés.")

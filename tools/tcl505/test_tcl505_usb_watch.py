@@ -130,6 +130,8 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(watch.classify_usb("0E8D", "0003"), "mediatek_brom_candidate")
         self.assertEqual(watch.classify_usb("0e8d", "2000"), "mediatek_preloader_candidate")
         self.assertEqual(watch.classify_usb("0E8D", "2001"), "mediatek_preloader_or_da_candidate")
+        self.assertEqual(watch.classify_usb("0E8D", "201C"), "mediatek_lk_fastboot_candidate")
+        self.assertEqual(watch.classify_usb("0e8d", "201c"), "mediatek_lk_fastboot_candidate")
         self.assertEqual(watch.classify_usb("0E8D", "9999"), "mediatek_other_usb")
         self.assertEqual(watch.classify_usb("1BBB", "0C01"), "tcl_adb_usb_candidate")
         self.assertEqual(watch.classify_usb("1BBB", "0001"), "tcl_other_usb")
@@ -258,6 +260,26 @@ class ReportTests(unittest.TestCase):
         text = watch.render_text(report)
         self.assertIn("USB\\VID_0E8D&PID_0003", text)
         self.assertNotIn("SERIAL-BROM-456", text)
+
+    def test_lk_fastboot_candidate_gets_own_note(self):
+        tracker = watch.UsbTracker(salt="s")
+        tracker.observe("enumerated", "USB\\VID_0E8D&PID_201C\\SERIAL-LK-321", 0.0, NOW,
+                        {"description": "Android Bootloader Interface"})
+        tracker.observe("removed", "USB\\VID_0E8D&PID_201C\\SERIAL-LK-321", 4.0, utc(4.0))
+        report = watch.build_report(
+            tracker, backend_name="fake", requested_seconds=5.0, actual_seconds=5.0,
+            started_utc=NOW, stopped_utc=utc(5.0), stop_reason="completed", issue=None,
+            initial_count=0, final_count=0, snapshot_count=6, backend_errors=[],
+            callback_errors=0, callback_dropped=0)
+        self.assertEqual(report["candidate_sessions"][0]["classification"],
+                         "mediatek_lk_fastboot_candidate")
+        notes = " ".join(report["interpretation"])
+        self.assertIn("LK fastboot", notes)
+        self.assertIn("getvar is-userspace", notes)
+        self.assertNotIn("SERIAL-LK-321", json.dumps(report))
+        text = watch.render_text(report)
+        self.assertIn("0E8D&PID_201C", text)
+        self.assertNotIn("SERIAL-LK-321", text)
 
     def test_write_bundle_manifest_and_zip(self):
         report = make_report()

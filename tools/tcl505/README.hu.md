@@ -206,8 +206,13 @@ futásonként sózott, rövid kivonat (`instance_key`) szerepel, hogy az esemén
 
 - `mediatek_brom_candidate` (`0E8D:0003`), `mediatek_preloader_candidate`
   (`0E8D:2000/201D/20FF/3000/6000`), `mediatek_preloader_or_da_candidate`
-  (`0E8D:2001`) vagy `tcl_adb_usb_candidate` (`1BBB:0C01`) **jelölt** esetén
-  a napló megmutatja, mennyi ideig volt látható az adott USB mód.
+  (`0E8D:2001`), `mediatek_lk_fastboot_candidate` (`0E8D:201C`) vagy
+  `tcl_adb_usb_candidate` (`1BBB:0C01`) **jelölt** esetén a napló megmutatja,
+  mennyi ideig volt látható az adott USB mód.
+- A `0E8D:201C` **bootloader-fastboot** (LK) jelölt, nem preloader/BROM. Hogy
+  LK fastboot vagy `fastbootd`, az csak külön, csak olvasó
+  `fastboot getvar is-userspace` lekérdezéssel dönthető el; ezt a figyelő
+  nem küldi el.
 - A VID/PID egyezés **nem bizonyít** BROM-exploitot, DA betöltést, SLA/DAA
   megkerülést vagy írható `seccfg` hozzáférést. Ez csak a USB-mód jelenlétének
   passzív bizonyítéka.
@@ -248,6 +253,30 @@ rezgésig) és kihúzott kábellel: (1) gomb nélkül csak bedugás, (2) Hanger�
 T509K szervizkézikönyv szerint a Power + Hangerő FEL a recovery menüt hozza,
 ezért az nem része ennek a sorrendnek, és a recovery `Wipe data/factory reset`
 pontját nem szabad megerősíteni.
+
+### Mért eredmény 2026-11-13, harmadik futás – LK fastboot jelölt
+
+A harmadik (10:03:46–10:05:46 UTC) futás hat MediaTek ablakot rögzített, és
+benne **`0E8D:201C`**, `Android Bootloader Interface` leírással, 3.91 s-ig:
+
+| látható ablak (rel.) | VID:PID | osztály / szolgáltatás | leírás | hossz |
+|---|---|---|---|---|
+| 9.00 – 11.50 s | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.50 s |
+| 36.25 – 38.76 s | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.51 s |
+| 63.03 – 63.93 s | `0E8D:20FF` | HIDClass / HidUsb | USB beviteli eszköz | 0.89 s |
+| 74.55 – 77.06 s | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 2.51 s |
+| 101.90 – 102.47 s | `0E8D:2000` | USBDevice / WinUSB | MT65xx Preloader | 0.57 s |
+| 107.92 – 111.83 s | **`0E8D:201C`** | AndroidUsbDeviceClass / WinUSB | **Android Bootloader Interface** | 3.91 s |
+
+A `0E8D:201C` a MediaTek **LK fastboot** azonosítója (bootloader-fastboot),
+nem preloader és nem BROM. A `0E8D:0003` (BROM) ebben a futásban sem jelent
+meg. A felhasználó jelezte, hogy ez a futás a Hangerő FEL gombos próbához
+tartozott; a napló maga nem tartalmaz gombcímkét, ezért a többi ablak
+hozzárendelése továbbra is nyitott.
+
+**Fontos:** az `0E8D:201C` megjelenése azt jelenti, hogy a bootloader-fastboot
+elérése nem csak `adb reboot bootloader`-rel lehetséges, hanem kézi
+gombkombinációval is. Ez a 0.4.0 szempontjából hasznos, de **nem** BROM.
 
 ## Feltöltés elemzésre
 
@@ -314,7 +343,9 @@ szimulált Windows PnP backenddel futnak:
 py -3 -m unittest -v test_tcl505_probe.py test_tcl505_files.py test_tcl505_usb_watch.py
 ```
 
-A 0.4.0 csomagból 94 offline teszt futott le Linux/Python 3.11 környezetben.
+A 0.4.0 csomagból 95 offline teszt futott le Linux/Python 3.11 környezetben
+(33 usb_watch, benne az `0E8D:201C` LK fastboot osztályozás és a hozzá tartozó
+értelmezési megjegyzés tesztje).
 A 0.3.0 ADB diagnosztika és fájlmásoló 2026-11-12-én valós T509K-n, felhasználói
 Windows/USB környezetben sikeres jelentést készített. Ugyanekkor valós
 bootloader-fastboot lekérdezés is történt (`is-userspace=no`); a 0.3.1 a nyers
